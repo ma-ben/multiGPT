@@ -1,0 +1,46 @@
+distributed:
+    tp_size: 1
+    cp_size: 1
+    pp_size: 4
+    dp_size: 1
+    pp_engine: "1f1b"
+    use_cpu: true
+
+model:
+    name: "gpt2"
+    tokenizer: "tokenizer_gpt2_2000"
+    vocab_size: 2000
+    block_size: 32
+    embed_dim: 4
+    num_heads: 2
+    num_layers: 4
+
+training:
+    seed: 42
+    learning_rate: 0.0003
+    total_train_steps: 20000
+    micro_batch_size: 4
+    gradient_accumulation_steps: 2
+    num_samples: 400000
+    max_tokens: null
+    use_fused_adam: false
+
+dataset:
+    name: "roneneldan/TinyStories"
+    subset_name: null
+    num_workers: 0
+    num_proc: 1
+
+checkpoint:
+    save_dir: "tmp/llama-1B-cpu"
+    save_frequency: 300
+    load_path: ""
+
+logging:
+    use_wandb: true
+    project_name: "multigpt"
+    run_name: "multigpt"
+
+environment:
+    OMP_NUM_THREADS: "1"
+    TOKENIZERS_PARALLELISM: "false"
