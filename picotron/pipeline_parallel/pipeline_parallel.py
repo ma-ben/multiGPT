@@ -18,7 +18,7 @@ class PipelineParallel(nn.Module):
         self.wte = model.wte if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
         self.wpe = model.wpe if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
         # Assign relevant decoder layers to this GPU
-        self.decoder_layers = nn.ModuleDict({str(i): model.h[i] for i in self.layer_distribution})
+        self.decoder_layers = nn.ModuleDict({str(i): model.blocks[i] for i in self.layer_distribution})
         # Only last stage has normalization and projection layers
         self.ln_f = model.ln_f if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
         self.lm_head = model.lm_head if pgm.process_group_manager.pp_is_last_stage else nn.Identity()

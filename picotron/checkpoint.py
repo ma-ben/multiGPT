@@ -58,7 +58,7 @@ def init_model_with_materialized_weights(model, model_config, save_dir=None):
         raise Exception("Some ranks has no layers. There are too many ranks and not enough layers to distribute.")
 
     state_dict = {}
-    if save_dir is not None:
+    if save_dir is None:
         for sft_name in model.state_dict().keys():
 
             # 获取该层真实期望 shape（meta tensor 已经告诉你了）

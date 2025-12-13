@@ -1,10 +1,14 @@
 from typing import List
 import torch
 import torch.distributed as dist
-from torch import nn
 
 class Bucket:
-    def __init__(self, params: List[torch.nn.Parameter], grad_data: torch.Tensor, process_group: torch.distributed.ProcessGroup) -> None:
+    def __init__(
+        self,
+        params: List[torch.nn.Parameter],
+        grad_data: torch.Tensor,
+        process_group: torch.distributed.ProcessGroup,
+    ) -> None:
         """
         Initializes a Bucket instance.
 
@@ -57,7 +61,13 @@ class Bucket:
             self.sync_gradient()
 
 class BucketManager:
-    def __init__(self, params: List[torch.nn.Parameter], process_group: torch.distributed.ProcessGroup, bucket_size: int, grad_type: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self,
+        params: List[torch.nn.Parameter],
+        process_group: torch.distributed.ProcessGroup,
+        bucket_size: int,
+        grad_type: torch.dtype = torch.float32,
+    ) -> None:
         """
         Initializes the BucketManager.
 

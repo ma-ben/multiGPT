@@ -2,6 +2,7 @@
     "files.exclude": {
         "**/.git/": true,
         "**/*.egg-info/": true,
+        "**/tmp": true,
         "**/__pycache__/": true
     }
 }

@@ -59,16 +59,11 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="", help="Path to config file")
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
-
     
+# set variables
     local_rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    assert config.model.vocab_size % config.distributed.tp_size == 0, "vocab_size must be divisible by tp_size for Tensor Parallelism"
-    assert config.model.block_size % config.distributed.cp_size == 0, "block_size must be divisible by cp_size for Context Parallelism"
-    assert world_size == config.distributed.tp_size * config.distributed.pp_size * config.distributed.dp_size * config.distributed.cp_size, "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
-
-# set variables
     set_all_seed(config.training.seed)
     os.environ["OMP_NUM_THREADS"] = config.environment.OMP_NUM_THREADS
     os.environ["TOKENIZERS_PARALLELISM"] = config.environment.TOKENIZERS_PARALLELISM
@@ -164,7 +159,7 @@ if __name__ == "__main__":
         # NOTE:PP
         if pgm.process_group_manager.pp_world_size > 1:
             model = PipelineParallel(model, model_config) 
-    model = init_model_with_materialized_weights(model, model_config, save_dir=f"./hf_model_safetensors/")
+    model = init_model_with_materialized_weights(model, model_config)
     # TODO: load existing checkpoint here to continue pre-training
     # NOTE:CP
     if pgm.process_group_manager.cp_world_size > 1:

@@ -1,8 +1,8 @@
 distributed:
-    tp_size: 1
+    tp_size: 2
     cp_size: 1
-    pp_size: 4
-    dp_size: 1
+    pp_size: 2
+    dp_size: 2
     pp_engine: "1f1b"
     use_cpu: true
 
@@ -32,12 +32,12 @@ dataset:
     num_proc: 1
 
 checkpoint:
-    save_dir: "tmp/llama-1B-cpu"
+    save_dir: "tmp/gpt2-cpu"
     save_frequency: 300
     load_path: ""
 
 logging:
-    use_wandb: true
+    use_wandb: false
     project_name: "multigpt"
     run_name: "multigpt"
 

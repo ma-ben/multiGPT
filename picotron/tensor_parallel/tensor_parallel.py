@@ -9,6 +9,8 @@ from picotron.tensor_parallel.tp_communications import ReduceFromModelParallelRe
 def apply_tensor_parallel(model):
 
     def _replace_module(_module, _linear_proj_name, _style, args={}):
+        if not hasattr(_module, _linear_proj_name):
+            return
         assert _style in ["column", "row", 'vocab']
         linear_layer = getattr(_module, _linear_proj_name)
         
@@ -42,12 +44,18 @@ def apply_tensor_parallel(model):
         ("mlp", "down_proj", "row"),
     ]
 
-    for layer in model.decoder_layers:
+    for layer in model.blocks:
         for module_name, linear_proj_name, style in module_linear_name_stype_mapping_list:
             _replace_module(getattr(layer, module_name), linear_proj_name, style)
-            
+    
+    # llama
     _replace_module(model, "embedding", "vocab")
     _replace_module(model, "final_proj", "column", args={"gather_output": True})
+    # gpt2
+    _replace_module(model, "wte", "vocab")
+    _replace_module(model, "wpe", "vocab")
+    _replace_module(model, "lm_head", "column", args={"gather_output": True})
+
     
     return model
 
@@ -83,7 +91,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.gather_output = gather_output
         self.async_all_reduce = async_all_reduce
         # Allocate space for the weight and bias
-        # Note: torch.nn.functional.linear performs XW^T + b so we exchange the order of dimensions
+        # NOTE: torch.nn.functional.linear performs XW^T + b so we exchange the order of dimensions
         self.weight = nn.Parameter(torch.Tensor(self.output_size_per_partition, self.in_features)) # W_i
         if bias:
             self.bias = nn.Parameter(torch.Tensor(self.output_size_per_partition))
@@ -251,9 +259,9 @@ class VocabParallelEmbedding(nn.Module):
         3. Reduces the embeddings across model parallel GPUs using all-reduce for synchronization
         """
         # Build the mask for out-of-vocabulary tokens.
-        input_mask = (x < self.vocab_start_index) | (x >= self.vocab_end_index)
+        input_mask = (x < self.vocab_start_index) | (x >= self.vocab_end_index) # bool list
         # Mask the input.
-        masked_input = x.clone() - self.vocab_start_index
+        masked_input = x.clone() - self.vocab_start_index # int list
         masked_input[input_mask] = 0
         # Get the embeddings for the valid tokens.
         output_parallel = F.embedding(
