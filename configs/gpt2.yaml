@@ -1,10 +1,10 @@
 distributed:
     tp_size: 2
     cp_size: 1
-    pp_size: 2
-    dp_size: 2
+    pp_size: 1
+    dp_size: 1
     pp_engine: "1f1b"
-    use_cpu: true
+    use_cpu: false
 
 model:
     name: "gpt2"
@@ -29,7 +29,7 @@ dataset:
     name: "roneneldan/TinyStories"
     subset_name: null
     num_workers: 0
-    num_proc: 1
+    num_proc: 4
 
 checkpoint:
     save_dir: "tmp/gpt2-cpu"

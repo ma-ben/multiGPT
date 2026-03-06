@@ -57,7 +57,7 @@ class MicroBatchDataLoader(DataLoader):
     @staticmethod
     def tokenizer_group_text(examples, tokenizer, sequence_length):
         """Tokenize a list of texts and group them in chunks of sequence_length + 1"""
-        tokenized_text_batch = tokenizer.batch_encode_plus(
+        tokenized_text_batch = tokenizer(
             examples,
             return_attention_mask=False,
             return_token_type_ids=False,

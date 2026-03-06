@@ -2,6 +2,7 @@ __pycache__
 *.pth
 *.egg-info
 *.ipynb
+*.venv
 wandb
 tests
 data

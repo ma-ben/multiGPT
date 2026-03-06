@@ -1,0 +1,14 @@
+[project]
+name = "multigpt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "datasets>=4.6.1",
+    "omegaconf>=2.3.0",
+    "safetensors>=0.7.0",
+    "tokenizers>=0.22.2",
+    "transformers>=5.3.0",
+    "wandb>=0.25.0",
+]
