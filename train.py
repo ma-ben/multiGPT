@@ -175,8 +175,8 @@ if __name__ == "__main__":
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, model_config.embed_dim)
     # checkpoint_manager = CheckpointManager()
     trained_tokens, step = 0, 0
-    num_params = get_num_params(model)
-    print(f"Number of parameters: {to_readable_format(num_params)}", is_print_rank=is_wandb_rank)
+    # num_params = get_num_params(model)
+    # print(f"Number of parameters: {to_readable_format(num_params)}", is_print_rank=is_wandb_rank)
 
     if config.training.use_fused_adam:
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
@@ -215,7 +215,7 @@ if __name__ == "__main__":
         step_duration = time.time() - step_start_time
         tokens_per_second = tokens_per_step / step_duration
         tokens_per_second_per_gpu = tokens_per_second / world_size
-        mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config)
+        # mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config)
         
         if is_wandb_rank:
             print(
@@ -226,7 +226,7 @@ if __name__ == "__main__":
                 f"Tokens/s: {to_readable_format(tokens_per_second):>7s} | "
                 f"Tokens/s/GPU: {to_readable_format(tokens_per_second_per_gpu):>7s} | "
                 f"Tokens: {to_readable_format(trained_tokens):>7s}{('/' + to_readable_format(config.training.max_tokens)) if config.training.max_tokens else ''} | "
-                f"MFU: {mfu:5.2f}% | "
+                # f"MFU: {mfu:5.2f}% | "
                 f"Memory usage: {torch.cuda.memory_reserved() / 1e9:6.2f}GB",
                 is_print_rank=is_wandb_rank
             )
@@ -236,7 +236,7 @@ if __name__ == "__main__":
                     "loss": loss,
                     "tokens_per_step": tokens_per_step,
                     "tokens_per_second": tokens_per_step / step_duration,
-                    "mfu": mfu,
+                    # "mfu": mfu,
                     "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
                     "memory_usage": torch.cuda.memory_reserved() / 1e9,
                     "trained_tokens": trained_tokens

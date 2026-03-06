@@ -11,7 +11,9 @@ parser.add_argument("--debug", type=bool, default=False)
 parser.add_argument("--port_debug", type=int, default=5678)
 args = parser.parse_args()
 
-launch_mode = f"debugpy-run -m torch.distributed.run -p {args.port_debug} --" if args.debug else "torchrun"
+launch_mode = f"debugpy-run -m torch.distributed.run -p {args.port_debug} --" \
+                if args.debug else \
+                "torchrun"
 
 cfg = OmegaConf.load(args.config)
 
