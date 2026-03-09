@@ -19,7 +19,7 @@ import picotron.process_group_manager as pgm
 from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params
 # from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
-from picotron.data import MicroBatchDataLoader
+from picotron.data import RandomMicroBatchDataLoader
 from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from picotron.data_parallel.data_parallel import DataParallelBucket
@@ -89,18 +89,12 @@ if __name__ == "__main__":
 # initialize data loader
     is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
     print("initializing data loader...", is_print_rank=is_wandb_rank)
-    data_loader = MicroBatchDataLoader(
+    data_loader = RandomMicroBatchDataLoader(
         micro_batch_size=config.training.micro_batch_size,
         seq_length=config.model.block_size,
-        dataset_name=config.dataset.name,
-        tokenizer_name=config.model.tokenizer,
         grad_acc_steps=config.training.gradient_accumulation_steps,
         device=device,
-        num_workers=config.dataset.num_workers,
-        num_proc=config.dataset.num_proc,
-        num_samples=config.training.num_samples,
-        subset_name=config.dataset.subset_name,
-        split='train'
+        vocab_size=config.model.vocab_size,
     )
     dist.barrier()
 
@@ -118,7 +112,7 @@ if __name__ == "__main__":
                 "pipeline_parallel_size": pgm.process_group_manager.pp_world_size,
                 "data_parallel_size": pgm.process_group_manager.dp_world_size,
                 "model": config.model.name,
-                "dataset": config.dataset.name,
+                "dataset": "random_tokens",
                 "max_tokens": config.training.max_tokens,
                 "learning_rate": config.training.learning_rate,
                 "seed": config.training.seed,
@@ -132,7 +126,6 @@ if __name__ == "__main__":
     if pgm.process_group_manager.global_rank == 0:
         print(f"rank {pgm.process_group_manager.global_rank}: Creating model config")
         model_config = config.model
-        model_config.vocab_size = data_loader.tokenizer.vocab_size
         objects = [model_config]
     else:
         objects = [None]

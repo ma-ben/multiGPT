@@ -9,6 +9,41 @@ from picotron.utils import print
 
 import picotron.process_group_manager as pgm
 
+class RandomMicroBatchDataLoader:
+    def __init__(self, micro_batch_size, seq_length, vocab_size, grad_acc_steps, device):
+        self.micro_batch_size = micro_batch_size
+        self.seq_length = seq_length
+        self.vocab_size = vocab_size
+        self.grad_acc_steps = grad_acc_steps
+        self.device = device
+        self.global_batch_size = micro_batch_size * grad_acc_steps * pgm.process_group_manager.dp_world_size
+        self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
+        self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch_size = self.micro_batch_size
+        start_idx = pgm.process_group_manager.cp_rank * self.seq_length_per_gpu
+        end_idx = start_idx + self.seq_length_per_gpu
+        full_tokens = torch.randint(
+            low=0,
+            high=self.vocab_size,
+            size=(batch_size, self.seq_length + 1),
+            dtype=torch.long,
+            device=self.device,
+        )
+        input_ids = full_tokens[:, start_idx:end_idx].contiguous()
+        target_ids = full_tokens[:, start_idx + 1:end_idx + 1].contiguous()
+        position_ids = torch.arange(start_idx, end_idx, dtype=torch.long, device=self.device).unsqueeze(0).expand(batch_size, -1).contiguous()
+        return {
+            "input_ids": input_ids,
+            "target_ids": target_ids,
+            "position_ids": position_ids,
+            "hidden_states": None,
+        }
+
 class MicroBatchDataLoader(DataLoader):
     def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, device, subset_name=None, split="train", num_samples=None, pin_memory=True):
         self.micro_batch_size = micro_batch_size
