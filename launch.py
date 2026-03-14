@@ -28,6 +28,7 @@ assert cfg.model.block_size % cfg.distributed.cp_size == 0, "block_size must be 
 assert cfg.model.embed_dim % cfg.distributed.pp_size == 0, "embed_dim must be divisible by pp_size for Pipeline Parallelism"
 assert cfg.model.num_heads % cfg.distributed.dp_size == 0, "num_heads must be divisible by dp_size for Data Parallelism"
 
+print(f"TP: {cfg.distributed.tp_size}, CP: {cfg.distributed.cp_size}, PP: {cfg.distributed.pp_size}, DP: {cfg.distributed.dp_size}")
 cmd = f"""
 CUDA_DEVICE_MAX_CONNECTIONS=1 \\
 {launch_mode} \\
