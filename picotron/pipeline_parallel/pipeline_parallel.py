@@ -70,7 +70,8 @@ class PipelineParallel(nn.Module):
         Backward pass for this pipeline stage.
         Computes gradients for assigned layers using received gradient from next stage.
         """
-        if input_tensor is not None: input_tensor.retain_grad()
+        if input_tensor is not None: 
+            input_tensor.retain_grad()
         if output_tensor_grad is None:
             output_tensor_grad = torch.ones_like(output_tensor, memory_format=torch.preserve_format)
         # torch.autograd.backward will automatically accumulates gradients in the leaves (cf: https://pytorch.org/docs/stable/generated/torch.autograd.backward.html)
@@ -89,7 +90,7 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype):
         device: Device to run computations on
         dtype: Data type for tensors
     """
-    logging_loss: torch.float32 = 0.0
+    logging_loss: torch.float32 = 0.0 # type: ignore
     # Store tensors to recreate computation graph during backward pass
     input_tensors, output_tensors = [], []
     requires_grad_sync = pgm.process_group_manager.cp_dp_world_size > 1

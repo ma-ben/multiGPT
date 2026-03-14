@@ -8,7 +8,7 @@ from picotron.tensor_parallel.tp_communications import ReduceFromModelParallelRe
 
 def apply_tensor_parallel(model):
 
-    def _replace_module(_module, _linear_proj_name, _style, args={}):
+    def _replace_module(_module, _linear_proj_name, _style, gather_output, async_all_reduce):
         if not hasattr(_module, _linear_proj_name):
             return
         assert _style in ["column", "row", 'vocab']
@@ -19,7 +19,8 @@ def apply_tensor_parallel(model):
                 in_features=linear_layer.in_features,
                 out_features=linear_layer.out_features,
                 bias=linear_layer.bias is not None,
-                gather_output=args.get("gather_output", False)
+                gather_output=gather_output,
+                async_all_reduce=async_all_reduce
             )
         elif _style == "row":
             new_linear_layer = RowParallelLinear(
@@ -46,15 +47,15 @@ def apply_tensor_parallel(model):
 
     for layer in model.blocks:
         for module_name, linear_proj_name, style in module_linear_name_stype_mapping_list:
-            _replace_module(getattr(layer, module_name), linear_proj_name, style)
+            _replace_module(getattr(layer, module_name), linear_proj_name, style, async_all_reduce=True)
     
     # llama
     _replace_module(model, "embedding", "vocab")
-    _replace_module(model, "final_proj", "column", args={"gather_output": True})
+    _replace_module(model, "final_proj", "column", gather_output=True)
     # gpt2
     _replace_module(model, "wte", "vocab")
     _replace_module(model, "wpe", "vocab")
-    _replace_module(model, "lm_head", "column", args={"gather_output": True})
+    _replace_module(model, "lm_head", "column", gather_output=True)
 
     
     return model
