@@ -4,7 +4,7 @@ distributed:
     pp_size: 1
     dp_size: 1
     pp_engine: "1f1b"
-    use_cpu: true
+    use_cpu: false
 
 model:
     name: "gpt2"
