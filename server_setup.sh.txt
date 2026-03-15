@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+# SSH key
+PUB_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMXNx+LoJqIf/Jy0hVg8Y5kxaUn1yM5k9CWU57pz2nhT taom@mac"
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+touch ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+grep -qxF "$PUB_KEY" ~/.ssh/authorized_keys || echo "$PUB_KEY" >> ~/.ssh/authorized_keys
+
+
+###########################################################
+# 下载clash并配置
+mkdir ~/clash; cd ~/clash;
+wget "https://x1f35.big-files.make-w0rld-static.club:8000/file/ikuuu-static-release/clash-linux/clash-linux-1.0.1/clash-linux-amd64.gz" -O clash-linux-amd64.gz;
+gzip -d clash-linux-amd64.gz;
+mv clash-linux-amd64 clash;
+chmod +x clash;
+cd clash
+wget -O config.yaml ""
+# 后台持续运行 ./clash -d . 
+nohup ./clash -d . > clash.log 2>&1 &
+cd ~
+# 
+echo 'export http_proxy=http://127.0.0.1:7890' >> ~/.bashrc
+echo 'export https_proxy=http://127.0.0.1:7890' >> ~/.bashrc
+echo 'export all_proxy=socks5h://127.0.0.1:7890' >> ~/.bashrc
+# uv
+command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+# repo
+[ -d "$HOME/multiGPT" ] || git clone https://github.com/ma-ben/multiGPT.git ~/multiGPT
+# https://clash.razord.top/
