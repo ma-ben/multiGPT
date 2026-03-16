@@ -22,9 +22,9 @@ wget -O config.yaml ""
 nohup ./clash -d . > clash.log 2>&1 &
 cd ~
 # 
-echo 'export http_proxy=http://127.0.0.1:7890' >> ~/.bashrc
-echo 'export https_proxy=http://127.0.0.1:7890' >> ~/.bashrc
-echo 'export all_proxy=socks5h://127.0.0.1:7890' >> ~/.bashrc
+echo 'export http_proxy=http://127.0.0.1:17890' >> ~/.bashrc
+echo 'export https_proxy=http://127.0.0.1:17890' >> ~/.bashrc
+echo 'export all_proxy=socks5h://127.0.0.1:17890' >> ~/.bashrc
 # uv
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 # repo
