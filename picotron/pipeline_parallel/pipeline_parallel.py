@@ -1,9 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.profiler import record_function
+import contextlib
 
 import picotron.process_group_manager as pgm
-from picotron.pipeline_parallel.pp_communications import pipeline_communicate, bidirectional_pipeline_communicate
+from picotron.pipeline_parallel.pp_communications import bidirectional_pipeline_communicate, drain_pipeline_communications, pipeline_communicate
+
+
+def _get_autocast_context(model, device):
+    use_autocast = getattr(model, "runtime_use_autocast", False)
+    autocast_dtype = getattr(model, "runtime_autocast_dtype", None)
+    if not use_autocast or device.type != "cuda":
+        return contextlib.nullcontext()
+    return torch.autocast(device_type="cuda", dtype=autocast_dtype)
 
 class PipelineParallel(nn.Module):
     """
@@ -28,17 +38,18 @@ class PipelineParallel(nn.Module):
     def reset_parameters(self):
         """Initialize or reset all model parameters for this pipeline stage."""
         if pgm.process_group_manager.pp_is_first_stage:
-            self.embedding.reset_parameters()
+            self.wte.reset_parameters()
+            self.wpe.reset_parameters()
 
         for layer in self.decoder_layers.values():
-            layer.input_layernorm.reset_parameters()
-            layer.attention.reset_parameters()
-            layer.post_attention_layernorm.reset_parameters()
-            layer.mlp.reset_parameters()
+            # 逐层递归 reset，保证 attention / MLP 内部的线性层也一起初始化。
+            for module in layer.modules():
+                if module is not layer and hasattr(module, "reset_parameters"):
+                    module.reset_parameters()
 
         if pgm.process_group_manager.pp_is_last_stage:
-            self.final_norm.reset_parameters()
-            self.final_proj.reset_parameters()
+            self.ln_f.reset_parameters()
+            self.lm_head.reset_parameters()
 
     def distribute_layers(self, num_layers):
         """
@@ -56,10 +67,20 @@ class PipelineParallel(nn.Module):
         Forward pass for this pipeline stage.
         Processes input through assigned layers and passes result to next stage.
         """
+        # PP 的关键约束：
+        # 1. 只有首段持有 token embedding / position embedding；
+        # 2. 中间段与尾段接收到的是 hidden states，不能再把它当 token id 做 embedding。
+        # 原始实现里无论是不是首段都会执行 `wte + wpe`，在非首段上虽然模块是 Identity，
+        # 但仍会把位置向量加到激活上，等价于“重复注入位置编码”，这会直接破坏正确性。
+        if hidden_states is None:
+            # 首段从 input_ids 构造初始隐藏状态。
+            if position_ids is None:
+                position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand(input_ids.shape[0], -1)
+            x = self.wte(input_ids) + self.wpe(position_ids)
+        else:
+            # 非首段只消费前一段发来的激活，不再触碰 token/position embedding。
+            x = hidden_states
 
-        x = hidden_states if hidden_states is not None else input_ids
-        pos = torch.arange(x.shape[-1], device=x.device)
-        x = self.wte(x) + self.wpe(pos)
         for layer in self.decoder_layers.values():
             x = layer(x)
         x = self.ln_f(x)
@@ -96,20 +117,29 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype):
     requires_grad_sync = pgm.process_group_manager.cp_dp_world_size > 1
 
     for _ in range(data_loader.grad_acc_steps): # All forward passes
-        # communication: receive the activation from the previous stage
-        input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
-        # or fetch from data loader
-        batch = next(data_loader)
-        batch["hidden_states"] = input_tensor.to(device) if input_tensor is not None else input_tensor
-        # forward: pass
-        output_tensor = model.forward(input_ids=batch["input_ids"].to(device), position_ids=batch["position_ids"].to(device), hidden_states=batch["hidden_states"])
-        # communication: send the activation to the next stage
-        pipeline_communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=dtype)
+        with record_function("pp/afab/recv_forward"):
+            # 从上一段接收激活。首段没有上游，因此会得到 None。
+            input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
+        with record_function("pp/afab/load_batch"):
+            # 所有 rank 都推进 dataloader，这样 micro-batch 边界才一致。
+            batch = next(data_loader)
+            batch["hidden_states"] = input_tensor.to(device) if input_tensor is not None else input_tensor
+        with _get_autocast_context(model, device):
+            with record_function("pp/afab/forward"):
+                output_tensor = model.forward(
+                    input_ids=batch["input_ids"].to(device),
+                    position_ids=batch["position_ids"].to(device),
+                    hidden_states=batch["hidden_states"],
+                )
+        with record_function("pp/afab/send_forward"):
+            pipeline_communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=dtype)
         
         # calculate loss on the last stage
         if pgm.process_group_manager.pp_is_last_stage:
-            output_tensor = F.cross_entropy(output_tensor.flatten(0, 1), batch["target_ids"].to(device).flatten(), reduction='mean')
-            logging_loss += output_tensor.item() / data_loader.grad_acc_steps
+            with _get_autocast_context(model, device):
+                with record_function("pp/afab/loss"):
+                    output_tensor = F.cross_entropy(output_tensor.flatten(0, 1), batch["target_ids"].to(device).flatten(), reduction='mean')
+                    logging_loss += output_tensor.item() / data_loader.grad_acc_steps
 
         # Save input/output activations to reconstruct computation graph during backward pass
         input_tensors.append(input_tensor)
@@ -119,15 +149,17 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype):
         if requires_grad_sync:
             is_last_iteration = (ith_microbatch == data_loader.grad_acc_steps - 1)
             model.require_backward_grad_sync = is_last_iteration
-        # communication: receive the gradient from the next stage
-        output_tensor_grad = pipeline_communicate(operation='recv_backward', shapes=tensor_shapes, device=device, dtype=dtype)
+        with record_function("pp/afab/recv_backward"):
+            output_tensor_grad = pipeline_communicate(operation='recv_backward', shapes=tensor_shapes, device=device, dtype=dtype)
         # Retrieve saved input/output activations in FIFO order to match forward pass sequence
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
-        # backward: pass
-        input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
-        # communication: send the gradient to the previous stage
-        pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=dtype)
+        with record_function("pp/afab/backward"):
+            input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
+        with record_function("pp/afab/send_backward"):
+            pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=dtype)
 
+    # AFAB 允许 send-only 在 step 内异步推进，但 step 结束前必须统一收口。
+    drain_pipeline_communications()
     return logging_loss
 
 def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):    
@@ -155,22 +187,33 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):
     
     def _forward_step(input_tensor):
         """Helper function to perform a single forward step in the pipeline."""
-        batch = next(data_loader)
-        batch["hidden_states"] = input_tensor.to(device) if input_tensor is not None else input_tensor
-        output_tensor = model.forward(input_ids=batch["input_ids"].to(device), position_ids=batch["position_ids"].to(device), hidden_states=batch["hidden_states"])
+        with record_function("pp/1f1b/load_batch"):
+            batch = next(data_loader)
+            batch["hidden_states"] = input_tensor.to(device) if input_tensor is not None else input_tensor
+        with _get_autocast_context(model, device):
+            with record_function("pp/1f1b/forward"):
+                output_tensor = model.forward(
+                    input_ids=batch["input_ids"].to(device),
+                    position_ids=batch["position_ids"].to(device),
+                    hidden_states=batch["hidden_states"],
+                )
         
         # calculate loss on the last stage
         if pgm.process_group_manager.pp_is_last_stage:
-            output_tensor = F.cross_entropy(output_tensor.flatten(0, 1), batch["target_ids"].to(device).flatten(), reduction='mean')
-            nonlocal logging_loss
-            logging_loss += output_tensor.item() / data_loader.grad_acc_steps
+            with _get_autocast_context(model, device):
+                with record_function("pp/1f1b/loss"):
+                    output_tensor = F.cross_entropy(output_tensor.flatten(0, 1), batch["target_ids"].to(device).flatten(), reduction='mean')
+                    nonlocal logging_loss
+                    logging_loss += output_tensor.item() / data_loader.grad_acc_steps
         return output_tensor
 
     # Warmup Phase: Fill the pipeline with forward passes
     for _ in range(num_warmup_microbatches):
-        input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
+        with record_function("pp/1f1b/warmup_recv_forward"):
+            input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
         output_tensor = _forward_step(input_tensor)
-        pipeline_communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=dtype)
+        with record_function("pp/1f1b/warmup_send_forward"):
+            pipeline_communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=dtype)
         # Store tensors for later backward passes during cooldown phase
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
@@ -184,7 +227,8 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):
 
     # Steady State Phase: Alternate between forward and backward passes
     if num_microbatches_remaining > 0:
-        input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
+        with record_function("pp/1f1b/steady_recv_forward"):
+            input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
     
     #NOTE: Explanation as to how to make DP and PP work together: https://github.com/huggingface/picotron/pull/5#issue-2629838274
     if requires_grad_sync:
@@ -193,7 +237,8 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):
     for ith_microbatch in range(num_microbatches_remaining):  # 1F1B steady state
         is_last_iteration = (ith_microbatch == num_microbatches_remaining - 1)
         output_tensor = _forward_step(input_tensor)
-        output_tensor_grad = bidirectional_pipeline_communicate(operation='send_fwd_recv_bwd', send_tensor=output_tensor, recv_shapes=tensor_shapes, device=device, dtype=dtype)
+        with record_function("pp/1f1b/send_fwd_recv_bwd"):
+            output_tensor_grad = bidirectional_pipeline_communicate(operation='send_fwd_recv_bwd', send_tensor=output_tensor, recv_shapes=tensor_shapes, device=device, dtype=dtype)
         # Store current tensors for next backward pass
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
@@ -204,13 +249,16 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):
         if num_warmup_microbatches == 0 and is_last_iteration:
             model.require_backward_grad_sync = True
 
-        input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
+        with record_function("pp/1f1b/backward"):
+            input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         
         if is_last_iteration:
             input_tensor = None
-            pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=dtype)
+            with record_function("pp/1f1b/final_send_backward"):
+                pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=dtype)
         else:
-            input_tensor = bidirectional_pipeline_communicate(operation='send_bwd_recv_fwd', send_tensor=input_tensor_grad, recv_shapes=tensor_shapes, device=device, dtype=dtype)
+            with record_function("pp/1f1b/send_bwd_recv_fwd"):
+                input_tensor = bidirectional_pipeline_communicate(operation='send_bwd_recv_fwd', send_tensor=input_tensor_grad, recv_shapes=tensor_shapes, device=device, dtype=dtype)
 
     # Cooldown Phase: Complete remaining backward passes
     for ith_warmup_microbatches in range(num_warmup_microbatches):
@@ -219,8 +267,13 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):
             model.require_backward_grad_sync = (ith_warmup_microbatches == num_warmup_microbatches - 1)
         # Process remaining stored tensors from warmup phase in FIFO order
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
-        output_tensor_grad = pipeline_communicate(operation='recv_backward', shapes=tensor_shapes, device=device, dtype=dtype)
-        input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
-        pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=dtype)
+        with record_function("pp/1f1b/cooldown_recv_backward"):
+            output_tensor_grad = pipeline_communicate(operation='recv_backward', shapes=tensor_shapes, device=device, dtype=dtype)
+        with record_function("pp/1f1b/cooldown_backward"):
+            input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
+        with record_function("pp/1f1b/cooldown_send_backward"):
+            pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=dtype)
 
+    # 1F1B 中部分 send-only 被延迟等待，这里在离开 step 前统一 drain。
+    drain_pipeline_communications()
     return logging_loss

@@ -1,9 +1,11 @@
 import os
 import re
 import json
+import random
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+import numpy as np
 from safetensors import safe_open
 import contextlib
 
@@ -250,6 +252,8 @@ class InitializationManager:
 
 class CheckpointManager:
     def __init__(self):
+        self.global_rank = pgm.process_group_manager.global_rank
+        self.world_size = pgm.process_group_manager.world_size
         self.tp_rank = pgm.process_group_manager.tp_rank
         self.pp_rank = pgm.process_group_manager.pp_rank
         self.tp_world_size = pgm.process_group_manager.tp_world_size
@@ -259,39 +263,112 @@ class CheckpointManager:
         self.cp_rank = pgm.process_group_manager.cp_rank
 
     def _get_checkpoint_path(self, out_dir):
-        ckpt_name = f"weights_tp_rank_world_size={self.tp_rank}_{self.tp_world_size}_pp_rank_world_size={self.pp_rank}_{self.pp_world_size}.pth"
+        # 这里改成“每个 global rank 一个文件”。
+        # 代价是 DP/CP 副本会多存一些重复权重；收益是恢复语义简单、RNG 状态完整，
+        # 更适合当前仓库的教学主线：先保证 correctness 和 recovery，再去谈去重与异步化。
+        ckpt_name = (
+            f"rank={self.global_rank}_world={self.world_size}"
+            f"_dp={self.dp_rank}_pp={self.pp_rank}_cp={self.cp_rank}_tp={self.tp_rank}.pth"
+        )
         return os.path.join(out_dir, ckpt_name)
+
+    def _unwrap_model(self, model):
+        return model.module if self.cp_dp_world_size > 1 else model
+
+    def _capture_rng_state(self):
+        """
+        保存训练恢复真正需要的最小 RNG 集合：
+        - Python random
+        - NumPy random
+        - Torch CPU RNG
+        - Torch CUDA RNG（如果有）
+
+        如果不保存 RNG，resume 看似成功，后续数据、dropout、初始化序列仍可能漂移。
+        """
+        state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch_cpu": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["torch_cuda"] = torch.cuda.get_rng_state()
+        return state
+
+    def _restore_rng_state(self, rng_state):
+        if rng_state is None:
+            return
+        random.setstate(rng_state["python"])
+        np.random.set_state(rng_state["numpy"])
+        torch.set_rng_state(rng_state["torch_cpu"])
+        if torch.cuda.is_available() and "torch_cuda" in rng_state:
+            torch.cuda.set_rng_state(rng_state["torch_cuda"])
+
+    def _get_topology_metadata(self):
+        return {
+            "world_size": self.world_size,
+            "tp_world_size": self.tp_world_size,
+            "pp_world_size": self.pp_world_size,
+            "dp_world_size": pgm.process_group_manager.dp_world_size,
+            "cp_world_size": pgm.process_group_manager.cp_world_size,
+            "cp_dp_world_size": self.cp_dp_world_size,
+        }
+
+    def _validate_topology(self, checkpoint):
+        saved_topology = checkpoint.get("topology", {})
+        current_topology = self._get_topology_metadata()
+        if saved_topology and saved_topology != current_topology:
+            raise RuntimeError(
+                f"Checkpoint topology mismatch. saved={saved_topology}, current={current_topology}"
+            )
+
+    def _move_optimizer_state_to_model_device(self, optimizer, model):
+        """
+        `torch.load(..., map_location='cpu')` 后，optimizer state 里的 tensor 会落在 CPU。
+        这一步把它们迁回模型所在设备，避免 GPU 恢复后出现 state device 不一致。
+        """
+        model_device = next(model.parameters()).device
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(model_device)
 
     def save_checkpoint(self, model, optimizer, trained_steps, trained_tokens, out_dir):
         """Save the model/optimizer states/steps to a checkpoint file."""
         path = self._get_checkpoint_path(out_dir)
-        
-        # Only DP/CP rank 0 will save the model, the weights are the same across all ranks
-        if self.dp_rank == 0 and self.cp_rank == 0:
-            os.makedirs(out_dir, exist_ok=True)
-            raw_model = model.module if self.cp_dp_world_size > 1 else model
-            checkpoint = {
-                'model': raw_model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'trained_steps': trained_steps,
-                'trained_tokens': trained_tokens
-            }
-            torch.save(checkpoint, path)
+
+        dist.barrier()
+        os.makedirs(out_dir, exist_ok=True)
+        raw_model = self._unwrap_model(model)
+        checkpoint = {
+            "model": raw_model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "trained_steps": trained_steps,
+            "trained_tokens": trained_tokens,
+            "rng_state": self._capture_rng_state(),
+            "topology": self._get_topology_metadata(),
+        }
+        torch.save(checkpoint, path)
+        dist.barrier()
 
     def load_checkpoint(self, model, optimizer, out_dir):
         """Load the model/optimizer states from the latest checkpoint. Assume the topology is the same."""
         path = self._get_checkpoint_path(out_dir)
-        
+
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint not found at {path}")
-            
-        checkpoint = torch.load(path)
+
+        dist.barrier()
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        self._validate_topology(checkpoint)
 
         # Load model weights
-        raw_model = model.module if self.cp_dp_world_size > 1 else model
-        raw_model.load_state_dict(checkpoint['model'])
-        
+        raw_model = self._unwrap_model(model)
+        raw_model.load_state_dict(checkpoint["model"])
+
         # Load optimizer state
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        
-        return checkpoint['trained_steps'], checkpoint['trained_tokens']
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        self._move_optimizer_state_to_model_device(optimizer, raw_model)
+        self._restore_rng_state(checkpoint.get("rng_state"))
+
+        dist.barrier()
+        return checkpoint["trained_steps"], checkpoint["trained_tokens"]

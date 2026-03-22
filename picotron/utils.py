@@ -44,10 +44,24 @@ def to_readable_format(num, precision=2):
 def get_mfu(tokens_per_second, num_params, model_config, theoretical_flops = 989.5 * 10 ** 12):
     num_layers = model_config.num_layers
     hidden_dim = model_config.embed_dim
-    seq_len = model_config.vocab_size
+    # MFU 里需要的是序列长度，而不是词表大小。
+    # 之前这里误用了 vocab_size，会让吞吐估算偏离真实训练开销。
+    seq_len = model_config.block_size
     flops_per_token = 6 * num_params + 12 * num_layers * hidden_dim * seq_len
     mfu = tokens_per_second * flops_per_token / theoretical_flops * 100 # percentage
     return mfu
+
+def get_memory_usage_gb(device):
+    """
+    统一返回当前设备的显存占用。
+
+    训练日志里经常会把显存一起打印出来，但 CPU 模式下直接访问
+    `torch.cuda.memory_reserved()` 会让代码语义变得很怪。
+    这里做一层封装，把“是否是 CUDA 设备”这个分支收敛掉。
+    """
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return 0.0
+    return torch.cuda.memory_reserved(device) / 1e9
 
 def get_num_params(model):
     """Calculate total number of parameters accounting for tensor parallelism and pipeline parallelism.

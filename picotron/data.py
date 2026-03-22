@@ -51,6 +51,9 @@ class MicroBatchDataLoader(DataLoader):
         self.grad_acc_steps = grad_acc_steps
         self.global_batch_size = micro_batch_size * grad_acc_steps * pgm.process_group_manager.dp_world_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
+        # DataLoader 子类自己维护迭代器时，最好显式初始化。
+        # 这样切到真实数据模式时，不会把 `_iterator` 是否存在交给父类内部实现去碰运气。
+        self._iterator = None
         
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
         self.dataset = load_dataset(dataset_name, split=split, name=subset_name)
