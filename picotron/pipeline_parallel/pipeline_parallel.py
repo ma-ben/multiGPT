@@ -24,9 +24,11 @@ class PipelineParallel(nn.Module):
         super().__init__()
         # Determine which layers should be assigned to this GPU
         self.layer_distribution = self.distribute_layers(config.num_layers)
+        self.embed_tokens = model.embed_tokens if pgm.process_group_manager.pp_is_first_stage else None
         # Only first stage has embedding layer, others use Identity
-        self.wte = model.wte if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
-        self.wpe = model.wpe if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
+        self.wte = getattr(model, "wte", nn.Identity()) if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
+        self.wpe = getattr(model, "wpe", nn.Identity()) if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
+        self.drop = getattr(model, "drop", nn.Identity()) if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
         # Assign relevant decoder layers to this GPU
         self.decoder_layers = nn.ModuleDict({str(i): model.blocks[i] for i in self.layer_distribution})
         # Only last stage has normalization and projection layers
@@ -38,8 +40,10 @@ class PipelineParallel(nn.Module):
     def reset_parameters(self):
         """Initialize or reset all model parameters for this pipeline stage."""
         if pgm.process_group_manager.pp_is_first_stage:
-            self.wte.reset_parameters()
-            self.wpe.reset_parameters()
+            if hasattr(self.wte, "reset_parameters"):
+                self.wte.reset_parameters()
+            if hasattr(self.wpe, "reset_parameters"):
+                self.wpe.reset_parameters()
 
         for layer in self.decoder_layers.values():
             # 逐层递归 reset，保证 attention / MLP 内部的线性层也一起初始化。
@@ -76,13 +80,16 @@ class PipelineParallel(nn.Module):
             # 首段从 input_ids 构造初始隐藏状态。
             if position_ids is None:
                 position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand(input_ids.shape[0], -1)
-            x = self.wte(input_ids) + self.wpe(position_ids)
+            if self.embed_tokens is not None:
+                x = self.embed_tokens(input_ids, position_ids)
+            else:
+                x = self.drop(self.wte(input_ids) + self.wpe(position_ids))
         else:
             # 非首段只消费前一段发来的激活，不再触碰 token/position embedding。
             x = hidden_states
 
         for layer in self.decoder_layers.values():
-            x = layer(x)
+            x = layer(x, position_ids=position_ids)
         x = self.ln_f(x)
         return self.lm_head(x)
 

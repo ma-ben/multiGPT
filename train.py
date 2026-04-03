@@ -29,6 +29,7 @@ from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.data import MicroBatchDataLoader, RandomMicroBatchDataLoader
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model.gpt2 import GPT
+from picotron.model.qwen import Qwen
 from picotron.monitor import StepTimer, profiling_context
 from picotron.pipeline_parallel.pipeline_parallel import PipelineParallel, train_step_pipeline_1f1b, train_step_pipeline_afab
 from picotron.process_group_manager import setup_process_group_manager
@@ -170,18 +171,39 @@ def build_model(config, dtype, device, is_print_rank):
     """
     print("开始初始化模型（meta -> parallel wrapper -> materialize）", is_print_rank=is_print_rank)
     model_config = config.model
+    model_name = str(model_config.name).lower()
     attention_backend = model_config.get("attention_backend", "eager") if hasattr(model_config, "get") else "eager"
+    dropout = float(model_config.get("dropout", 0.1)) if hasattr(model_config, "get") else 0.1
     activation_checkpointing = bool(model_config.get("activation_checkpointing", False)) if hasattr(model_config, "get") else False
     with init_model_with_dematerialized_weights():
-        model = GPT(
-            vocab_size=model_config.vocab_size,
-            block_size=model_config.block_size,
-            embed_dim=model_config.embed_dim,
-            num_heads=model_config.num_heads,
-            num_layers=model_config.num_layers,
-            attention_backend=attention_backend,
-            activation_checkpointing=activation_checkpointing,
-        )
+        if model_name == "gpt2":
+            model = GPT(
+                vocab_size=model_config.vocab_size,
+                block_size=model_config.block_size,
+                embed_dim=model_config.embed_dim,
+                num_heads=model_config.num_heads,
+                num_layers=model_config.num_layers,
+                dropout=dropout,
+                attention_backend=attention_backend,
+                activation_checkpointing=activation_checkpointing,
+            )
+        elif model_name in {"qwen", "qwen3"}:
+            model = Qwen(
+                vocab_size=model_config.vocab_size,
+                block_size=model_config.block_size,
+                embed_dim=model_config.embed_dim,
+                num_heads=model_config.num_heads,
+                num_key_value_heads=model_config.get("num_key_value_heads", model_config.num_heads),
+                num_layers=model_config.num_layers,
+                intermediate_size=model_config.get("intermediate_size", 4 * model_config.embed_dim),
+                dropout=dropout,
+                rope_theta=model_config.get("rope_theta", 1_000_000.0),
+                rms_norm_eps=model_config.get("rms_norm_eps", 1e-6),
+                attention_backend=attention_backend,
+                activation_checkpointing=activation_checkpointing,
+            )
+        else:
+            raise ValueError(f"Unsupported model.name: {model_config.name}")
 
         if pgm.process_group_manager.tp_world_size > 1:
             model = apply_tensor_parallel(model)

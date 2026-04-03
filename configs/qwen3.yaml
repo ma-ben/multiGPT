@@ -6,19 +6,21 @@ distributed:
     pp_engine: "1f1b"
 
 model:
-    name: "gpt2"
+    name: "qwen3"
     tokenizer: "tokenizer_gpt2_2000"
-    # eager: 手写 attention，适合教学与追踪每一步张量流
-    # sdpa:  使用 PyTorch 官方 scaled_dot_product_attention 后端
+    # 这里保留最小 Qwen3-like 结构：RMSNorm + RoPE + GQA + SwiGLU
     attention_backend: "sdpa"
-    # activation checkpointing 会在反向时重算 block 前向，减少激活显存占用。
     activation_checkpointing: false
-    dropout: 0.1
+    dropout: 0.0
     vocab_size: 2000
     block_size: 32
-    embed_dim: 4
-    num_heads: 2
+    embed_dim: 8
+    num_heads: 4
+    num_key_value_heads: 2
+    intermediate_size: 32
     num_layers: 4
+    rms_norm_eps: 0.000001
+    rope_theta: 1000000.0
 
 training:
     seed: 42
@@ -29,15 +31,11 @@ training:
     num_samples: 400000
     max_tokens: null
     use_fused_adam: false
-    # 开启后在 CUDA 上使用 autocast；dtype 由运行时自动选择。
     use_autocast: false
-    # 当前只建议在单卡 CUDA dense 路径打开 compile。
     use_torch_compile: false
     torch_compile_mode: "reduce-overhead"
 
 dataset:
-    # random: 用随机 token 做并行与吞吐基线
-    # hf:     走真实 HuggingFace dataset，验证训练闭环
     loader: "random"
     name: "roneneldan/TinyStories"
     subset_name: null
@@ -45,14 +43,14 @@ dataset:
     num_proc: 4
 
 checkpoint:
-    save_dir: "tmp/gpt2"
+    save_dir: "tmp/qwen3"
     save_frequency: 300
     load_path: ""
 
 logging:
     use_wandb: false
     project_name: "multigpt"
-    run_name: "multigpt"
+    run_name: "multigpt-qwen3"
 
 profiling:
     enabled: false
